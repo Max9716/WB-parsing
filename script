@@ -1,0 +1,122 @@
+import requests
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+import time
+import logging
+import pandas as pd
+
+pages = 1000
+search = []
+
+logging.basicConfig(
+    filename="wb_parser.log",
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+def basket(id, page):
+    try:
+        page.goto(f"https://www.wildberries.ru/catalog/{id}/detail.aspx")
+        page.wait_for_timeout(5000)
+        soup = BeautifulSoup(page.content(), 'xml').find("div", class_="imgContainer--N9WXW").find("img")["src"].split(".ru")[0]
+        return soup
+    except Exception as e:
+        logging.info(f"Ошибка получения Баскета {id} - {e}")
+
+def slot_info(id, page):
+        try:
+            bsk = basket(id, page)
+            headers = {
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 YaBrowser/25.12.0.0 Safari/537.36"
+            }
+            url = f"{bsk}.ru/vol{id // 100000}/part{id // 1000}/{id}/info/ru/card.json"
+            proxies = {
+                "http": ".....", #Данные для прокси
+                "https": "....." #Данные для прокси
+            }
+            response = requests.get(url, headers=headers, proxies=proxies, timeout=10)
+            info = response.json()
+            info["basket"] = bsk
+            return info
+        except Exception as e:
+            logging.info(f"Ошибка чтения карточки {id} - {e}")
+
+for list in range(1, pages):
+    try:
+        url = 'https://search.wb.ru/exactmatch/ru/common/v18/search'
+        params = {
+            "appType": 1,
+            "curr": "rub",
+            "dest": -1184645,
+            "lang": "ru",
+            "query": "пальто из натуральной шерсти",
+            "resultset": "catalog",
+            "page": f"{list}",
+            "sort": "popular",
+            "spp": 30
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+        proxies = {
+            "http": ".....", #Данные для прокси
+            "https": "....." #Данные для прокси
+        }
+        response_all = requests.get(url, headers=headers, params=params, proxies=proxies, timeout=10)
+        response_all.encoding = 'utf-8'
+        soup = response_all.json()
+        if list > soup["total"] // 100 + 1:
+            break
+        with sync_playwright() as p:
+            browser = p.chromium.launch_persistent_context(
+                user_data_dir="C:/chrome-real-profile",
+                headless=True,
+                channel="chrome",
+                args=[
+                    "--start-maximized",
+                    "--disable-blink-features=AutomationControlled"
+                ]
+            )
+            page = browser.new_page()
+            for a in soup["products"]:
+                try:
+                    lot = {}
+                    lot_add = slot_info(a["id"], page)
+                    lot['url'] = f"https://www.wildberries.ru/catalog/{a['id']}/detail.aspx"
+                    lot['name'] = a['name']
+                    lot['price'] = a['sizes'][0]["price"]["product"] / 100
+                    lot['description'] = lot_add['description']
+                    lot['image'] = ",\n".join([f'{lot_add["basket"]}.ru/vol{a["id"] // 100000}/part{a["id"] // 1000}/{a["id"]}/images/big/{num}.webp' for num in range(1, lot_add["media"]["photo_count"] + 1)])
+                    x_full = []
+                    for x in lot_add["grouped_options"]:
+                        text = '\n'.join([str(f"{a['name']} - {a['value']} ") for a in x['options']])
+                        x_full.append(f"{x['group_name']}: \n {text} \n")
+                    lot['options'] = "\n".join(x_full)
+                    lot['seller'] = a["supplier"]
+                    lot['seller_url'] = f"https://www.wildberries.ru/seller/{a['supplierId']}"
+                    lot['sizes'] = ",\n".join([x["name"] for x in a["sizes"]])
+                    lot['volume'] = a["volume"]
+                    lot['rating'] = a["nmReviewRating"]
+                    lot['feedback'] = a["nmFeedbacks"]
+                    lot["from"] = [a["value"] for a in lot_add["options"] if a["name"] == "Страна производства"][0]
+                    search.append(lot)
+                except:
+                    continue
+            browser.close()
+        time.sleep(60)
+    except Exception as e:
+        logging.info(f"Ошибка чтения страницы {list} - {e}" )
+        logging.error(f"Статус: {response_all.status_code}")
+        continue
+
+
+df = pd.DataFrame(search)
+
+df_filtered = df[
+    (df["rating"] > 4.5) &
+    (df["price"] < 10000) &
+    (df["from"] == "Россия")
+]
+
+df.to_excel("wb.xlsx", index=False)
+df_filtered.to_excel("wb_fillter.xlsx", index=False)
+
